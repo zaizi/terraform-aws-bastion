@@ -52,6 +52,12 @@ resource "aws_s3_bucket_object" "bucket_public_keys_readme" {
   content = "Drop here the ssh public keys of the instances you want to control"
 }
 
+resource "aws_s3_bucket_object" "bucket_clients_readme" {
+  bucket  = aws_s3_bucket.bucket.id
+  key     = "clients/README"
+  content = "Drop here the client namespace and db you want to create"
+}
+
 resource "aws_security_group" "bastion_host_security_group" {
   description = "Enable SSH access to the bastion host from external via SSH port"
   name        = "${local.name_prefix}-host"
@@ -148,11 +154,26 @@ resource "aws_iam_role_policy" "bastion_host_role_policy" {
     },
     {
       "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::${var.bucket_name}/clients/*"
+    },
+    {
+      "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::${var.bucket_name}",
       "Condition": {
         "StringEquals": {
           "s3:prefix": "public-keys/"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::${var.bucket_name}",
+      "Condition": {
+        "StringEquals": {
+          "s3:prefix": "clients/"
         }
       }
     }
@@ -219,7 +240,7 @@ resource "aws_iam_instance_profile" "bastion_host_profile" {
 resource "aws_launch_configuration" "bastion_launch_configuration" {
   name_prefix                 = var.bastion_launch_configuration_name
   image_id                    = data.aws_ami.amazon-linux-2.id
-  instance_type               = "t2.nano"
+  instance_type               = "t2.small"
   associate_public_ip_address = var.associate_public_ip_address
   enable_monitoring           = true
   iam_instance_profile        = aws_iam_instance_profile.bastion_host_profile.name

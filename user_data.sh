@@ -2,6 +2,62 @@
 yum -y update --security
 
 ##########################
+## INSTALL REQUIRED SOFTWARE
+##########################
+# Install extra packages
+amazon-linux-extras install epel -y
+# Install terraform
+yum install wget unzip -y
+wget https://releases.hashicorp.com/terraform/0.12.18/terraform_0.12.18_linux_amd64.zip
+unzip terraform_0.12.18_linux_amd64.zip
+mv ./terraform /usr/local/bin/terraform
+# Install kubectl 
+cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+EOF
+yum install kubectl -y
+# Install postgresql client
+yum install postgresql -y
+# Install aws-iam-authenticator
+curl -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.13.7/2019-06-11/bin/linux/amd64/aws-iam-authenticator
+chmod +x aws-iam-authenticator
+mv ./aws-iam-authenticator /usr/local/bin/aws-iam-authenticator
+# Install Helm
+su ec2-user
+cd /home/ec2-user/
+curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
+sudo chown ec2-user:ec2-user ./get_helm.sh
+chmod 700 get_helm.sh
+sudo ./get_helm.sh
+exit
+
+##########################
+## Create a kubeconfig for Amazon EKS
+##########################
+# su ec2-user
+# cd /home/ec2-user/
+# mkdir ~/.aws
+# cat <<EOF > ~/.aws/credentials
+# [default]
+# aws_access_key_id = 
+# aws_secret_access_key = 
+# EOF
+# cat <<EOF > ~/.aws/config
+# [default]
+# region = eu-west-2
+# output = json
+# EOF
+# aws eks --region eu-west-2 update-kubeconfig --name dpa-eks-cluster-stage
+# export KUBECONFIG=$KUBECONFIG:~/.kube/config
+# exit
+
+##########################
 ## ENABLE SSH RECORDING ##
 ##########################
 
@@ -160,6 +216,70 @@ EOF
 
 chmod 700 /usr/bin/bastion/sync_users
 
+#######################################
+## SYNCHRONIZE CLIENTS
+#######################################
+
+# The client files are stored on S3 with the following naming convention: "client.txt".
+# This script retrieves the client files, creates or deletes k8 namespaces as needed,
+# and DB on RDS with the flowable schema
+
+cat > /usr/bin/bastion/sync_clients << 'EOF'
+#!/usr/bin/env bash
+
+# The file will log client changes
+LOG_FILE="/var/log/bastion/clients_changelog.txt"
+
+# The function returns the client name from the file name.
+# Example: clients/client-1.txt => client-1
+get_client_name () {
+  echo "$1" | sed -e "s/.*\///g" | sed -e "s/\.txt//g"
+}
+
+# For each client file available in the S3 bucket
+aws s3api list-objects --bucket ${bucket_name} --prefix clients/ --region ${aws_region} --output text --query 'Contents[?Size>`0`].Key' | tr '\t' '\n' > ~/clients_retrieved_from_s3
+while read line; do
+  CLIENT_NAME="`get_client_name "$line"`"
+
+  # Make sure the user name is alphanumeric
+  if [[ "$CLIENT_NAME" =~ ^[a-z][-a-z0-9]*$ ]]; then
+
+    # Create a client K8 namespace and the db if it does not already exist
+    kubectl get namespaces | grep -qo $CLIENT_NAME
+    if [ $? -eq 1 ]; then
+      kubectl create namespace $CLIENT_NAME
+      echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Creating K8 namespace for $CLIENT_NAME ($line)" >> $LOG_FILE
+      export PGPASSWORD='PQ.Wqr#e2yv\)R%b'
+      DB_NAME=`echo $CLIENT_NAME | sed -r 's/[-]+/_/g'`
+      echo "CREATE DATABASE $DB_NAME;" | psql -h 'db-stage.labs.zaizicloud.net' -d 'dpa_stage' -U 'dpa'
+      echo "CREATE SCHEMA IF NOT EXISTS flowable AUTHORIZATION dpa;" | psql -h 'db-stage.labs.zaizicloud.net' -d "$DB_NAME" -U 'dpa'
+      echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Creating RDS database $DB_NAME for $CLIENT_NAME ($line)" >> $LOG_FILE
+      echo "$line" >> ~/clients_onboarded
+    fi
+
+  fi
+done < ~/clients_retrieved_from_s3
+
+# Remove clients whose client file was deleted from S3
+if [ -f ~/clients_onboarded ]; then
+  sort -uo ~/clients_onboarded ~/clients_onboarded
+  sort -uo ~/clients_retrieved_from_s3 ~/clients_retrieved_from_s3
+  comm -13 ~/clients_retrieved_from_s3 ~/clients_onboarded | sed "s/\t//g" > ~/clients_to_remove
+  while read line; do
+    CLIENT_NAME="`get_client_name "$line"`"
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing K8 namespace and RDS database for $CLIENT_NAME ($line)" >> $LOG_FILE
+    kubectl delete namespace $CLIENT_NAME
+    export PGPASSWORD='PQ.Wqr#e2yv\)R%b'
+    DB_NAME=`echo $CLIENT_NAME | sed -r 's/[-]+/_/g'`
+    echo "DROP DATABASE $DB_NAME" | psql -h 'db-stage.labs.zaizicloud.net' -d 'dpa_stage' -U 'dpa'
+  done < ~/clients_to_remove
+  comm -3 ~/clients_onboarded ~/clients_to_remove | sed "s/\t//g" > ~/tmp && mv ~/tmp ~/clients_onboarded
+fi
+
+EOF
+
+chmod 700 /usr/bin/bastion/sync_clients
+
 ###########################################
 ## SCHEDULE SCRIPTS AND SECURITY UPDATES ##
 ###########################################
@@ -167,6 +287,7 @@ chmod 700 /usr/bin/bastion/sync_users
 cat > ~/mycron << EOF
 */5 * * * * /usr/bin/bastion/sync_s3
 */5 * * * * /usr/bin/bastion/sync_users
+*/5 * * * * /usr/bin/bastion/sync_clients
 0 0 * * * yum -y update --security
 EOF
 crontab ~/mycron
