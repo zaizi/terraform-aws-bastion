@@ -4,6 +4,10 @@ data "template_file" "user_data" {
   vars = {
     aws_region  = var.region
     bucket_name = var.bucket_name
+    db_host     = var.db_host
+    db_name     = var.db_name
+    db_user     = var.db_user
+    db_password = var.db_password
   }
 }
 

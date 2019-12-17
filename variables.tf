@@ -109,3 +109,20 @@ variable "private_ssh_port" {
   default     = 22
 }
 
+# DPA customisations
+variable "db_password" {
+  description = "The database password"
+}
+
+variable "db_host" {
+  description = "The database host"
+}
+
+variable "db_name" {
+  description = "The database name"
+}
+
+variable "db_user" {
+  description = "The database user"
+}
+

@@ -29,33 +29,14 @@ curl -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.13
 chmod +x aws-iam-authenticator
 mv ./aws-iam-authenticator /usr/local/bin/aws-iam-authenticator
 # Install Helm
-su ec2-user
-cd /home/ec2-user/
 curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
-sudo chown ec2-user:ec2-user ./get_helm.sh
 chmod 700 get_helm.sh
-sudo ./get_helm.sh
-exit
-
-##########################
-## Create a kubeconfig for Amazon EKS
-##########################
-# su ec2-user
-# cd /home/ec2-user/
-# mkdir ~/.aws
-# cat <<EOF > ~/.aws/credentials
-# [default]
-# aws_access_key_id = 
-# aws_secret_access_key = 
-# EOF
-# cat <<EOF > ~/.aws/config
-# [default]
-# region = eu-west-2
-# output = json
-# EOF
-# aws eks --region eu-west-2 update-kubeconfig --name dpa-eks-cluster-stage
-# export KUBECONFIG=$KUBECONFIG:~/.kube/config
-# exit
+./get_helm.sh
+# Add the helm repositories
+helm init
+helm repo add stable https://kubernetes-charts.storage.googleapis.com/
+helm repo add flowable https://flowable.org/helm/
+helm repo update
 
 ##########################
 ## ENABLE SSH RECORDING ##
@@ -243,16 +224,15 @@ while read line; do
 
   # Make sure the user name is alphanumeric
   if [[ "$CLIENT_NAME" =~ ^[a-z][-a-z0-9]*$ ]]; then
-
     # Create a client K8 namespace and the db if it does not already exist
     kubectl get namespaces | grep -qo $CLIENT_NAME
     if [ $? -eq 1 ]; then
       kubectl create namespace $CLIENT_NAME
       echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Creating K8 namespace for $CLIENT_NAME ($line)" >> $LOG_FILE
-      export PGPASSWORD='PQ.Wqr#e2yv\)R%b'
+      export PGPASSWORD='${db_password}'
       DB_NAME=`echo $CLIENT_NAME | sed -r 's/[-]+/_/g'`
-      echo "CREATE DATABASE $DB_NAME;" | psql -h 'db-stage.labs.zaizicloud.net' -d 'dpa_stage' -U 'dpa'
-      echo "CREATE SCHEMA IF NOT EXISTS flowable AUTHORIZATION dpa;" | psql -h 'db-stage.labs.zaizicloud.net' -d "$DB_NAME" -U 'dpa'
+      echo "CREATE DATABASE $DB_NAME;" | psql -h '${db_host}' -d '${db_name}' -U '${db_user}'
+      echo "CREATE SCHEMA IF NOT EXISTS flowable AUTHORIZATION ${db_user};" | psql -h '${db_host}' -d "$DB_NAME" -U '${db_user}'
       echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Creating RDS database $DB_NAME for $CLIENT_NAME ($line)" >> $LOG_FILE
       echo "$line" >> ~/clients_onboarded
     fi
@@ -267,11 +247,12 @@ if [ -f ~/clients_onboarded ]; then
   comm -13 ~/clients_retrieved_from_s3 ~/clients_onboarded | sed "s/\t//g" > ~/clients_to_remove
   while read line; do
     CLIENT_NAME="`get_client_name "$line"`"
-    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing K8 namespace and RDS database for $CLIENT_NAME ($line)" >> $LOG_FILE
     kubectl delete namespace $CLIENT_NAME
-    export PGPASSWORD='PQ.Wqr#e2yv\)R%b'
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing K8 namespace for $CLIENT_NAME ($line)" >> $LOG_FILE
+    export PGPASSWORD='${db_password}'
     DB_NAME=`echo $CLIENT_NAME | sed -r 's/[-]+/_/g'`
-    echo "DROP DATABASE $DB_NAME" | psql -h 'db-stage.labs.zaizicloud.net' -d 'dpa_stage' -U 'dpa'
+    echo "DROP DATABASE $DB_NAME" | psql -h '${db_host}' -d '${db_name}' -U '${db_user}'
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing RDS database for $CLIENT_NAME ($line)" >> $LOG_FILE
   done < ~/clients_to_remove
   comm -3 ~/clients_onboarded ~/clients_to_remove | sed "s/\t//g" > ~/tmp && mv ~/tmp ~/clients_onboarded
 fi
@@ -285,9 +266,11 @@ chmod 700 /usr/bin/bastion/sync_clients
 ###########################################
 
 cat > ~/mycron << EOF
+HOME=/root
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin
 */5 * * * * /usr/bin/bastion/sync_s3
-*/5 * * * * /usr/bin/bastion/sync_users
-*/5 * * * * /usr/bin/bastion/sync_clients
+*/2 * * * * /usr/bin/bastion/sync_users
+*/2 * * * * export KUBECONFIG=~/.kube/config && /usr/bin/bastion/sync_clients
 0 0 * * * yum -y update --security
 EOF
 crontab ~/mycron
