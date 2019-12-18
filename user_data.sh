@@ -234,9 +234,65 @@ while read line; do
       echo "CREATE DATABASE $DB_NAME;" | psql -h '${db_host}' -d '${db_name}' -U '${db_user}'
       echo "CREATE SCHEMA IF NOT EXISTS flowable AUTHORIZATION ${db_user};" | psql -h '${db_host}' -d "$DB_NAME" -U '${db_user}'
       echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Creating RDS database $DB_NAME for $CLIENT_NAME ($line)" >> $LOG_FILE
+      helm repo add flowable https://flowable.org/helm/
+      helm repo update
+      helm install flowable/flowable \
+         --name-template flowable \
+         --set host.external="$CLIENT_NAME.labs.zaizicloud.net" \
+         --set database.username="${db_user}" \
+         --set database.password="$(echo $PGPASSWORD | sed -e 's#[()&\\]#\\&#g')" \
+         --set database.datasourceDriverClassName="org.postgresql.Driver" \
+         --set database.datasourceUrl="jdbc:postgresql://${db_host}:5432/$DB_NAME?currentSchema=flowable" \
+         --set postgres.enabled=false  \
+         --set ingress.enabled=false \
+         --set admin.enabled=true \
+         -n $CLIENT_NAME
+      echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Deploying flowable for $CLIENT_NAME ($line)" >> $LOG_FILE
+cat <<EOF | kubectl apply -f -
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: $CLIENT_NAME-ingress
+  namespace: $CLIENT_NAME
+  annotations:
+    external-dns.alpha.kubernetes.io/alias: "true"
+    kubernetes.io/ingress.class: "nginx-ingress"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/rewrite-target: /\$1
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  labels:
+    app.kubernetes.io/instance: flowable
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: ingress
+    helm.sh/chart: flowable-0.1.0
+spec:
+  rules:
+  - host: $CLIENT_NAME.labs.zaizicloud.net
+    http:
+      paths:
+      - backend:
+          serviceName: flowable-idm
+          servicePort: 8080
+        path: /flowable-idm/?(.*)
+      - backend:
+          serviceName: flowable-modeler
+          servicePort: 8888
+        path: /flowable-modeler/?(.*)
+      - backend:
+          serviceName: flowable-task
+          servicePort: 9999
+        path: /flowable-task/?(.*)
+      - backend:
+          serviceName: flowable-admin
+          servicePort: 9988
+        path: /flowable-admin/?(.*)
+      EOF
+      echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Deploying ingress for $CLIENT_NAME ($line)" >> $LOG_FILE
       echo "$line" >> ~/clients_onboarded
     fi
-
   fi
 done < ~/clients_retrieved_from_s3
 
@@ -247,12 +303,16 @@ if [ -f ~/clients_onboarded ]; then
   comm -13 ~/clients_retrieved_from_s3 ~/clients_onboarded | sed "s/\t//g" > ~/clients_to_remove
   while read line; do
     CLIENT_NAME="`get_client_name "$line"`"
+    kubectl delete ing $CLIENT_NAME-ingress -n $CLIENT_NAME
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing ingress for $CLIENT_NAME ($line)" >> $LOG_FILE
+    helm delete flowable -n $CLIENT_NAME
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing flowable for $CLIENT_NAME ($line)" >> $LOG_FILE
     kubectl delete namespace $CLIENT_NAME
     echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing K8 namespace for $CLIENT_NAME ($line)" >> $LOG_FILE
     export PGPASSWORD='${db_password}'
     DB_NAME=`echo $CLIENT_NAME | sed -r 's/[-]+/_/g'`
     echo "DROP DATABASE $DB_NAME" | psql -h '${db_host}' -d '${db_name}' -U '${db_user}'
-    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Removing RDS database for $CLIENT_NAME ($line)" >> $LOG_FILE
+    echo "`date --date="today" "+%Y-%m-%d %H-%M-%S"`: Dropping RDS database for $CLIENT_NAME ($line)" >> $LOG_FILE
   done < ~/clients_to_remove
   comm -3 ~/clients_onboarded ~/clients_to_remove | sed "s/\t//g" > ~/tmp && mv ~/tmp ~/clients_onboarded
 fi
